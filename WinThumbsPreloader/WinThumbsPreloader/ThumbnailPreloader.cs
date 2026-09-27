@@ -1,17 +1,48 @@
 ﻿using System;
 using System.Runtime.InteropServices;
-using System.Windows.Forms;
 
 namespace WinThumbsPreloader
 {
-    //Preload one thumbnail
-    class ThumbnailPreloader
+    public enum ThumbnailPreloadResult
     {
+        //The thumbnail was produced and is now in the thumbnail cache.
+        Preloaded,
+        //The shell has no thumbnail provider for this item, so there is nothing to cache.
+        NoThumbnail,
+        //Something went wrong, for example the item is gone or inaccessible.
+        Failed
+    }
+
+    //Preload one thumbnail
+    public class ThumbnailPreloader
+    {
+        public const uint DefaultThumbnailSize = 128;
+
+        //HRESULTs that mean "there is no thumbnail for this item" instead of "something broke".
+        //Observed with the local thumbnail cache:
+        //  0x8004B200 WTS_E_CACHE_BITS_NEW_AVAIL  no thumbnail provider is registered for this file type
+        //  0x80030002 WTS_E_NOTFOUND              the item is not in the thumbnail cache
+        //  0x8007065E ERROR_NOT_SUPPORTED         nothing on this machine can decode the format
+        public const int CacheBitsNewAvail = unchecked((int)0x8004B200);
+        public const int CacheNotFound = unchecked((int)0x80030002);
+        public const int FormatNotSupported = unchecked((int)0x8007065E);
+
+        private static bool IsNoThumbnail(int hresult)
+        {
+            return hresult == CacheBitsNewAvail || hresult == CacheNotFound || hresult == FormatNotSupported;
+        }
+
         private Guid iIdIShellItem;
         private IThumbnailCache TBCache;
+        private uint thumbnailSize;
 
-        public ThumbnailPreloader()
+        public ThumbnailPreloader() : this(DefaultThumbnailSize)
         {
+        }
+
+        public ThumbnailPreloader(uint thumbnailSize)
+        {
+            this.thumbnailSize = thumbnailSize;
             iIdIShellItem = new Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe");
             Guid CLSIDLocalThumbnailCache = new Guid("50ef4544-ac9f-4a8e-b21b-8a26180db13f");
             var TBCacheType = Type.GetTypeFromCLSID(CLSIDLocalThumbnailCache);
@@ -20,23 +51,53 @@ namespace WinThumbsPreloader
 
         public void PreloadThumbnail(string filePath)
         {
+            Exception error;
+            Preload(filePath, WTS_FLAGS.WTS_EXTRACTINPROC, out error);
+        }
+
+        public bool PreloadThumbnail(string filePath, WTS_FLAGS flags)
+        {
+            Exception error;
+            return Preload(filePath, flags, out error) == ThumbnailPreloadResult.Preloaded;
+        }
+
+        //Asks the thumbnail cache to produce and cache a thumbnail for the item.
+        //NoThumbnail means the shell has no thumbnail provider for that type of file,
+        //which is a normal answer and not an error.
+        public ThumbnailPreloadResult Preload(string filePath, WTS_FLAGS flags, out Exception error)
+        {
             IShellItem shellItem = null;
             ISharedBitmap bmp = null;
             WTS_CACHEFLAGS cFlags;
             WTS_THUMBNAILID bmpId;
+            error = null;
             try
             {
                 SHCreateItemFromParsingName(filePath, IntPtr.Zero, iIdIShellItem, out shellItem);
-                TBCache.GetThumbnail(shellItem, 128, WTS_FLAGS.WTS_EXTRACTINPROC, out bmp, out cFlags, out bmpId);
+                if (shellItem == null)
+                {
+                    error = new InvalidOperationException("SHCreateItemFromParsingName returned no shell item.");
+                    return ThumbnailPreloadResult.Failed;
+                }
+                TBCache.GetThumbnail(shellItem, thumbnailSize, flags, out bmp, out cFlags, out bmpId);
+                return ThumbnailPreloadResult.Preloaded;
             }
-            catch (Exception)
+            catch (COMException e)
             {
-                //Do nothing
+                if (IsNoThumbnail(e.ErrorCode)) return ThumbnailPreloadResult.NoThumbnail;
+                error = e;
+                return ThumbnailPreloadResult.Failed;
             }
-            if (bmp != null) Marshal.ReleaseComObject(bmp);
-            if (shellItem != null)  Marshal.ReleaseComObject(shellItem);
-            bmp = null;
-            shellItem = null;
+            catch (Exception e)
+            {
+                error = e;
+                return ThumbnailPreloadResult.Failed;
+            }
+            finally
+            {
+                if (bmp != null) Marshal.ReleaseComObject(bmp);
+                if (shellItem != null) Marshal.ReleaseComObject(shellItem);
+            }
         }
 
         //Import native functions
@@ -70,7 +131,7 @@ namespace WinThumbsPreloader
         }
 
         [Flags]
-        enum WTS_FLAGS : uint
+        public enum WTS_FLAGS : uint
         {
             WTS_EXTRACT = 0x00000000,
             WTS_INCACHEONLY = 0x00000001,

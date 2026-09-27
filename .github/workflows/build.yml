@@ -1,0 +1,128 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and release
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      # Puts the Visual C++ toolset, Windows SDK and MSVC environment on PATH for
+      # every following step. The Windows SDK in particular is what the WinForms
+      # project needs to build its .ru.resx satellite assembly.
+      - name: Set up MSVC developer command prompt
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+          export-path-to-vs: true
+
+      - name: Locate MSBuild
+        id: msbuild
+        shell: pwsh
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $path = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild `
+            -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $path) { throw 'MSBuild.exe was not found on this runner.' }
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Using $path"
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $isTag = '${{ github.ref_type }}' -eq 'tag'
+          $name = if ($isTag) { '${{ github.ref_name }}' -replace '^v', '' } else { 'dev' }
+          # AssemblyVersion must be numeric, so anything else is left to the default
+          # baked into the project file.
+          $numeric = if ($name -match '^\d+(\.\d+)*$') { $name } else { '' }
+          "version=$name" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "assemblyVersion=$numeric" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "isTag=$isTag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Build CLI
+        shell: pwsh
+        run: |
+          $cliArgs = @(
+            'WinThumbsPreloader\WinThumbsPreloader\cli\WinThumbsPreloader.Cli.csproj',
+            '/p:Configuration=Release',
+            '/p:Platform=AnyCPU',
+            '/v:minimal',
+            '/nologo'
+          )
+          $tagged = '${{ steps.version.outputs.assemblyVersion }}'
+          if ($tagged) { $cliArgs += "/p:Version=$tagged" }
+          & '${{ steps.msbuild.outputs.path }}' @cliArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # The WinForms project targets .NET Framework 4.5, which is out of support and
+      # is not installed on the runner image. Testing for the reference assembly
+      # directory is not enough: the v4.5 directory exists but holds no usable
+      # targeting pack, so the build is attempted and only MSB3644 is tolerated.
+      # Any other build error still fails the job.
+      - name: Build WinForms project (needs the 4.5 targeting pack)
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'winforms-build.log'
+          & '${{ steps.msbuild.outputs.path }}' `
+            'WinThumbsPreloader\WinThumbsPreloader\WinThumbsPreloader.csproj' `
+            /p:Configuration=Release /p:Platform='AnyCPU' /v:minimal /nologo 2>&1 | Tee-Object $log
+          $code = $LASTEXITCODE
+          if (Select-String -Path $log -Pattern 'MSB3644' -Quiet) {
+            Write-Output '::warning title=WinForms project skipped::The .NET Framework 4.5 targeting pack is not installed on this runner, so WinThumbsPreloader.csproj is not built here. Only the CLI is built and released. Install the .NET Framework 4.5 Developer Pack to cover the GUI.'
+            exit 0
+          }
+          exit $code
+
+      - name: Smoke test
+        shell: pwsh
+        run: |
+          $exe = 'WinThumbsPreloader\WinThumbsPreloader\cli\bin\Release\WinThumbsPreloader-cli.exe'
+          $reported = (& $exe --version)
+          Write-Host "reported version: $reported"
+          if ($LASTEXITCODE -ne 0) { throw '--version failed.' }
+          $tagged = '${{ steps.version.outputs.assemblyVersion }}'
+          if ($tagged -and ($reported -split ' ')[-1] -ne $tagged) {
+            throw "The binary reports '$reported' but the release is tagged '${{ steps.version.outputs.version }}'."
+          }
+          & $exe -n $env:GITHUB_WORKSPACE
+          if ($LASTEXITCODE -ne 0) { throw 'Dry run failed.' }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $exe = 'WinThumbsPreloader\WinThumbsPreloader\cli\bin\Release\WinThumbsPreloader-cli.exe'
+          $zip = "WinThumbsPreloader-cli-${{ steps.version.outputs.version }}.zip"
+          Compress-Archive -Path $exe, 'LICENSE' -DestinationPath $zip
+          "zip=$zip" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Get-Item $zip | Select-Object Name, Length
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v7
+        with:
+          name: WinThumbsPreloader-cli-${{ steps.version.outputs.version }}
+          path: WinThumbsPreloader-cli-${{ steps.version.outputs.version }}.zip
+          if-no-files-found: error
+
+      - name: Publish release
+        if: steps.version.outputs.isTag == 'true'
+        uses: softprops/action-gh-release@v3
+        with:
+          files: WinThumbsPreloader-cli-${{ steps.version.outputs.version }}.zip
+          generate_release_notes: true

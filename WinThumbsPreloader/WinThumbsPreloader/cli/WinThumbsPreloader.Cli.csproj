@@ -1,0 +1,94 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Console front-end for WinThumbsPreloader.
+
+  It compiles the same ThumbnailPreloader and DirectoryScanner sources as the WinForms
+  project instead of duplicating them, so both front-ends share one implementation.
+
+  This project uses the non-SDK project format so it builds with MSBuild.exe from the
+  .NET Framework directory. build.ps1 drives that and supplies FrameworkPathOverride,
+  which is needed when only the runtime is installed and no targeting pack is present.
+-->
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Release</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7C4B1E5A-9D3F-4A62-B8E1-2F6C0D5A9B31}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>WinThumbsPreloader.Cli</RootNamespace>
+    <AssemblyName>WinThumbsPreloader-cli</AssemblyName>
+    <!--
+      Version drives the assembly and file version, which is what the version option
+      reports and what Windows shows in the file properties. CI overrides it from the
+      release tag so a tagged build cannot ship a binary that claims a different number.
+    -->
+    <Version Condition=" '$(Version)' == '' ">1.0.1</Version>
+    <AssemblyVersion Condition=" '$(AssemblyVersion)' == '' ">$(Version)</AssemblyVersion>
+    <FileVersion Condition=" '$(FileVersion)' == '' ">$(Version)</FileVersion>
+    <Product>WinThumbsPreloader</Product>
+    <Company>WinThumbsPreloader contributors</Company>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <OutputPath Condition=" '$(OutputPath)' == '' ">bin\$(Configuration)\</OutputPath>
+    <DebugSymbols Condition=" '$(Configuration)' == 'Debug' ">true</DebugSymbols>
+    <DebugType Condition=" '$(Configuration)' == 'Debug' ">full</DebugType>
+    <Optimize Condition=" '$(Configuration)' == 'Release' ">true</Optimize>
+    <DebugType Condition=" '$(Configuration)' == 'Release' ">pdbonly</DebugType>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <Prefer32Bit>false</Prefer32Bit>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="CliOptions.cs" />
+    <Compile Include="CliProgram.cs" />
+    <Compile Include="CliRunner.cs" />
+    <Compile Include="..\ThumbnailPreloader.cs">
+      <Link>ThumbnailPreloader.cs</Link>
+    </Compile>
+    <Compile Include="..\DirectoryScanner.cs">
+      <Link>DirectoryScanner.cs</Link>
+    </Compile>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+
+  <!--
+    This project uses the non-SDK project format, so nothing emits the assembly
+    attributes automatically and every build would report version 0.0.0.0. Generating
+    them from the properties above is what lets a tagged build report its own version.
+  -->
+  <Target Name="GenerateAssemblyInfo" BeforeTargets="CoreCompile">
+    <ItemGroup>
+      <AssemblyAttributes Include="AssemblyTitleAttribute">
+        <_Parameter1>$(AssemblyName)</_Parameter1>
+      </AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyProductAttribute">
+        <_Parameter1>$(Product)</_Parameter1>
+      </AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyCompanyAttribute">
+        <_Parameter1>$(Company)</_Parameter1>
+      </AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyVersionAttribute">
+        <_Parameter1>$(AssemblyVersion)</_Parameter1>
+      </AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyFileVersionAttribute">
+        <_Parameter1>$(FileVersion)</_Parameter1>
+      </AssemblyAttributes>
+      <AssemblyAttributes Include="AssemblyInformationalVersionAttribute">
+        <_Parameter1>$(Version)</_Parameter1>
+      </AssemblyAttributes>
+    </ItemGroup>
+    <WriteCodeFragment AssemblyAttributes="@(AssemblyAttributes)"
+                      Language="C#"
+                      OutputDirectory="$(IntermediateOutputPath)"
+                      OutputFile="GeneratedAssemblyInfo.cs" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)GeneratedAssemblyInfo.cs" />
+      <FileWrites Include="$(IntermediateOutputPath)GeneratedAssemblyInfo.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

@@ -5,15 +5,62 @@ using System.Linq;
 
 namespace WinThumbsPreloader
 {
-    class DirectoryScanner
+    public class DirectoryScanner
     {
+        //Number of directory reads that failed (access denied, too long, vanished mid-walk).
+        public int unreadableDirectories = 0;
+        public string lastUnreadablePath = "";
+        public string lastUnreadableReason = "";
+
         private string path;
         private bool includeNestedDirectories;
+        private bool includeDirectories;
+        private bool followReparsePoints;
 
         public DirectoryScanner(string path, bool includeNestedDirectories)
+            : this(path, includeNestedDirectories, true, true)
+        {
+        }
+
+        public DirectoryScanner(string path, bool includeNestedDirectories, bool includeDirectories)
+            : this(path, includeNestedDirectories, includeDirectories, true)
+        {
+        }
+
+        public DirectoryScanner(string path, bool includeNestedDirectories, bool includeDirectories, bool followReparsePoints)
         {
             this.path = path;
             this.includeNestedDirectories = includeNestedDirectories;
+            this.includeDirectories = includeDirectories;
+            this.followReparsePoints = followReparsePoints;
+        }
+
+        public void ResetCounters()
+        {
+            unreadableDirectories = 0;
+            lastUnreadablePath = "";
+            lastUnreadableReason = "";
+        }
+
+        //Junctions and symlinks can point at their own ancestors. Walking one without
+        //checking would loop forever, so callers that walk a whole drive opt out.
+        private bool IsReparsePoint(string directoryPath)
+        {
+            try
+            {
+                return (File.GetAttributes(directoryPath) & FileAttributes.ReparsePoint) != 0;
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+
+        private void ReportUnreadable(string directoryPath, Exception error)
+        {
+            unreadableDirectories++;
+            lastUnreadablePath = directoryPath;
+            lastUnreadableReason = (error == null ? "unknown error" : error.Message);
         }
 
         public IEnumerable<string> GetItems()
@@ -35,14 +82,15 @@ namespace WinThumbsPreloader
             {
                 items = Directory.GetFileSystemEntries(path).ToArray();
             }
-            catch (Exception)
+            catch (Exception e)
             {
-                //Do nothing
+                ReportUnreadable(path, e);
             }
             if (items != null)
             {
                 for (int itemIndex = 0; itemIndex < items.Length; itemIndex++)
                 {
+                    if (!includeDirectories && Directory.Exists(items[itemIndex])) continue;
                     yield return items[itemIndex];
                 }
             }
@@ -56,16 +104,22 @@ namespace WinThumbsPreloader
             while (queue.Count > 0)
             {
                 currentPath = queue.Dequeue();
-                yield return currentPath;
+                if (includeDirectories) yield return currentPath;
                 string[] files = null;
                 try
                 {
-                    foreach (string subDirectory in Directory.GetDirectories(currentPath)) queue.Enqueue(subDirectory);
+                    if (followReparsePoints || !IsReparsePoint(currentPath))
+                    {
+                        foreach (string subDirectory in Directory.GetDirectories(currentPath))
+                        {
+                            if (followReparsePoints || !IsReparsePoint(subDirectory)) queue.Enqueue(subDirectory);
+                        }
+                    }
                     files = Directory.GetFiles(currentPath);
                 }
-                catch (Exception)
+                catch (Exception e)
                 {
-                    //Do nothing
+                    ReportUnreadable(currentPath, e);
                 }
                 if (files != null)
                 {
@@ -88,18 +142,27 @@ namespace WinThumbsPreloader
 
         private IEnumerable<int> GetItemsCountOnlyFirstLevel()
         {
-            int itemsCount = 0;
+            string[] items = null;
             try
             {
-                itemsCount = Directory.GetFileSystemEntries(path).Length;
+                items = Directory.GetFileSystemEntries(path);
             }
-            catch (Exception)
+            catch (Exception e)
             {
-                //Do nothing
+                ReportUnreadable(path, e);
             }
-           if (itemsCount > 0) yield return itemsCount;
+            if (items == null) yield break;
+            int itemsCount = 0;
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (includeDirectories || !Directory.Exists(items[i])) itemsCount++;
+            }
+            if (itemsCount > 0) yield return itemsCount;
         }
 
+        //Mirrors GetItemsNested exactly so the total matches the number of processed items.
+        //Every folder that is dequeued contributes its own entry plus its files, so
+        //enqueuing a subfolder must not add anything: it is counted when dequeued.
         private IEnumerable<int> GetItemsCountNested()
         {
             Queue<string> queue = new Queue<string>();
@@ -112,17 +175,20 @@ namespace WinThumbsPreloader
                 itemsCount = 0;
                 try
                 {
-                    foreach (string subDir in Directory.GetDirectories(currentPath))
+                    if (followReparsePoints || !IsReparsePoint(currentPath))
                     {
-                        queue.Enqueue(subDir);
-                        itemsCount++;
+                        foreach (string subDir in Directory.GetDirectories(currentPath))
+                        {
+                            if (followReparsePoints || !IsReparsePoint(subDir)) queue.Enqueue(subDir);
+                        }
                     }
                     itemsCount += Directory.GetFiles(currentPath).Length;
                 }
-                catch (Exception)
+                catch (Exception e)
                 {
-                    //Do nothing
+                    ReportUnreadable(currentPath, e);
                 }
+                if (includeDirectories) itemsCount++;
                 if (itemsCount > 0) yield return itemsCount;
             }
         }
